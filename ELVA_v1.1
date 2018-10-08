@@ -1,0 +1,231 @@
+pragma solidity ^0.4.4;
+
+contract Time_Tactics {
+  function give_tactics(uint require_repayment_time,uint deadline,uint set_time) public returns (uint); // 返回合适的require_repayment_time
+}
+contract Repayment_Tactics {
+  function give_tactics(uint total_balance,uint remain_balance,bool state_transaction_accomplish,uint set_repayment) public returns (uint, bool, uint); // (下一期需要的还款金额，是否完成全部还款，剩余的抵押金额)
+}
+contract Fail_Tactics {
+  function give_tactics(uint total_balance,uint require_repayment) public returns (uint); // 新的total_balance
+}
+
+contract simple_fail_Tac is Fail_Tactics {
+  function give_tactics(uint total_balance,uint require_repayment) public returns (uint) {
+    uint new_balance;
+    new_balance = total_balance - require_repayment;
+    return new_balance;
+  }
+}
+contract simple_time_Tac is Time_Tactics {
+  function give_tactics(uint require_repayment_time,uint deadline,uint set_time) public returns (uint) {
+    uint next_repayment_time;
+    if (require_repayment_time == 0){ // 当constructor创建合约时，根据策略设定第一个require_repayment_time
+      require_repayment_time = deadline; // 因为第一版本是一次还款
+      return require_repayment_time;
+    }
+    else{
+      if (set_time == 0){
+        next_repayment_time = require_repayment_time + 0; // 本行代码用来记录下次要返回的require_repayment_time
+        return next_repayment_time;
+      }
+      else
+      {
+        return set_time;
+      }
+    }
+  }
+}
+contract simple_repayment_Tac is Repayment_Tactics {
+  function give_tactics(uint total_balance,uint remain_balance,bool state_transaction_accomplish,uint set_repayment) public returns (uint ,bool, uint)
+  {
+    if(state_transaction_accomplish)
+    {
+      if (set_repayment != 0)
+      {
+        return (set_repayment, false, total_balance);
+      }
+      else {
+        return (0,true,0);
+      }
+    }
+    else
+    {
+      if (total_balance == remain_balance)
+      {
+        return (total_balance,false,total_balance);
+      }
+      else
+      {
+        return (total_balance,false,total_balance);
+      }
+    }
+  }
+}
+contract eva_main {
+  address private pool_addr;
+  address private lender_addr;
+  address private controller_addr;
+  uint private deadline;
+  uint private require_repayment_time;
+  uint private previous_time;
+  uint private total_balance;
+  uint private remain_balance;
+  uint private require_repayment;
+  uint private previous_repayment;
+  uint private usdt_value;
+  bool private state_transaction_accomplish;
+  bool private state_repayment_ack;
+  bool private state_accomplish;
+  bool private state_failed;
+  Time_Tactics private myTimeTactics;
+  Repayment_Tactics private myRepaymentTactics;
+  Fail_Tactics private myFailTactics;
+  
+  
+  event Transaction_accomplished (address lender, uint need_balance);
+  event Repayment_notify (address lender, uint require_repayment_time);
+  modifier visitorFunc {
+    require(lender_addr == msg.sender||pool_addr == msg.sender);
+    _;
+  }
+  modifier lenderFunc {
+    require(lender_addr == msg.sender);
+    _;
+  }
+  modifier adminFunc {
+    require(pool_addr == msg.sender);
+    _;
+  }
+  modifier controllerFunc {
+    require(controller_addr == msg.sender);
+    _;
+  }
+  modifier afterRequire_repayment_time {
+    require(now >= (require_repayment_time - 5 days));
+    _;
+  }
+  modifier afterDeadline {
+    require(now >= require_repayment_time);
+    _;
+  }
+  constructor(
+    Time_Tactics set_time_tactics_addr,
+    Repayment_Tactics set_repay_tactics_addr,
+    Fail_Tactics set_fail_tactics_addr,
+    address set_lender_addr,
+    address set_pool_addr,
+    address set_controller_addr,
+    uint set_balance) public {
+      myTimeTactics = set_time_tactics_addr;
+      myRepaymentTactics = set_repay_tactics_addr;
+      myFailTactics = set_fail_tactics_addr;
+      lender_addr = set_lender_addr;
+      pool_addr = set_pool_addr;
+      controller_addr = set_controller_addr;
+      total_balance = set_balance;
+      remain_balance = total_balance;
+      require_repayment_time = 0;
+      previous_time = 0;
+      previous_repayment = 0;
+  }
+  
+  function () payable public lenderFunc{
+    assert(msg.value > 1 ether);
+    uint amount = msg.value;
+    require(amount >= total_balance);
+    emit Transaction_accomplished(msg.sender, amount);
+    require_repayment_time = myTimeTactics.give_tactics(require_repayment_time,deadline,0); // 设定下一次需要还款的时间**还没有设定tactic需要输入的状态
+    (require_repayment,,remain_balance) = myRepaymentTactics.give_tactics(total_balance,remain_balance,state_transaction_accomplish,0); //设定下一次还款的数额（还款数额对应抵押的虚拟币）
+    state_transaction_accomplish = true;
+    
+  }
+  function deadline_set(uint set_deadline) public adminFunc {
+      deadline = now + set_deadline * 1 days;
+  }
+  function repayment() public adminFunc afterRequire_repayment_time {
+   emit Repayment_notify(lender_addr, total_balance);
+   state_repayment_ack = true;
+      
+  }
+  function repayment_suc() public controllerFunc {
+   bool finish = false;
+   if (previous_repayment != 0)
+   {
+     require_repayment = previous_repayment;
+     previous_repayment = 0;
+   }
+   else
+   {
+     (require_repayment,finish,remain_balance) = myRepaymentTactics.give_tactics(total_balance,remain_balance,state_transaction_accomplish,0);
+   }
+   if (previous_time != 0)
+   {
+     require_repayment_time = previous_time;
+     previous_time = 0;
+   }
+   else
+   {
+     require_repayment_time = myTimeTactics.give_tactics(require_repayment_time,deadline,0);
+   }
+   if (finish){
+     state_accomplish = true;
+     repayment_suc_opereation();
+   }
+ }
+ function repayment_suc_opereation() private {
+     lender_addr.transfer(total_balance);
+     selfdestruct(pool_addr);
+ }
+ function repayment_fail() public adminFunc afterDeadline {
+   uint new_balance;
+   state_failed = true;
+   new_balance = myFailTactics.give_tactics(total_balance,require_repayment);
+   repayment_fail_operation(total_balance - new_balance);
+   total_balance = new_balance;
+   if (total_balance == 0)
+   {
+     selfdestruct(pool_addr);
+   }
+   state_failed = false;
+ }
+ function repayment_fail_operation(uint amount) private {
+   pool_addr.transfer(amount);
+ }
+ function add_loan(uint set_time,uint set_repayment) public controllerFunc {
+   previous_repayment = require_repayment;
+   (require_repayment,,remain_balance) = myRepaymentTactics.give_tactics(total_balance,remain_balance,state_transaction_accomplish,set_repayment);
+   previous_time = require_repayment_time;
+   require_repayment_time = myTimeTactics.give_tactics(require_repayment_time,deadline,set_time);
+ }
+ function get_balance() public view visitorFunc returns (uint) {
+   return address(this).balance;
+ }
+ function get_lender_addr() public view adminFunc returns (address){
+   return lender_addr;
+ }
+ function get_deadline() public view visitorFunc returns (uint){
+   return deadline;
+ }
+ function get_require_payment_time() public view adminFunc returns (uint) {
+   return require_repayment_time;
+ }
+ function get_require_payment() public view adminFunc returns (uint) {
+   return require_repayment;
+ }
+ function get_total_balance() public view visitorFunc returns (uint){
+   return total_balance;
+ }
+ function get_state_transaction_accomplish() public view adminFunc returns (bool){
+   return state_transaction_accomplish;
+ }
+ function get_state_repayment_ack() public view adminFunc returns (bool) {
+   return state_repayment_ack;
+ }
+ function get_state_accomplish() public view adminFunc returns (bool){
+   return state_accomplish;
+ }
+ function get_state_failed() public view adminFunc returns (bool) {
+   return state_failed;
+ }
+}
